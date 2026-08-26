@@ -1,0 +1,17 @@
+== bench_beat
+machine: Apple M2 Pro, arm64, Darwin 25.0.0
+compiler: Apple LLVM 17.0.0 (clang-1700.6.3.2)
+iters: 200000000
+empty_loop        0.44 ns/iter
+clock_read       10.09 ns/iter  (ns_now only)
+beat_plain       10.17 ns/iter
+beat_nt          10.84 ns/iter
+scan_4mb_alone    90.7 GB/s
+scan_4mb_plain    90.4 GB/s  (one beat_plain per 4 MB scan)
+scan_4mb_nt       90.7 GB/s  (one beat_nt per 4 MB scan)
+== bench_detect
+config: stalls=200 stall_ms=2 every_ms=20 threshold_us=500 poll_us=100 capture=on
+stalls recorded: 200
+detect_latency_us   p50=77.2  p99=157.2
+duration_error_us   p50=87.5  p99=195.5  (measured duration minus injected 2000 us)
+capture_handler_us  p50=0.6  p99=3.1  (time inside the SIGUSR2 backtrace handler)

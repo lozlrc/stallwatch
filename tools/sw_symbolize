@@ -1,0 +1,49 @@
+#!/bin/sh
+# sw_symbolize: symbolize frame addresses in a stallwatch report.
+#
+# usage: tools/sw_symbolize REPORT_FILE
+#
+# Each "stall ..." line carries slide= (main image load address), exe=, and
+# frames= (comma-separated hex addresses). macOS: atos -o EXE -l SLIDE ADDRS.
+# Linux: addr2line -e EXE with slide-adjusted offsets (path untested on the
+# machine this was developed on, see README).
+
+[ $# -eq 1 ] || { echo "usage: sw_symbolize REPORT_FILE" >&2; exit 2; }
+[ -r "$1" ] || { echo "sw_symbolize: cannot read $1" >&2; exit 1; }
+
+os=$(uname -s)
+n=0
+while IFS= read -r line; do
+  case "$line" in
+    stall\ *) ;;
+    *) continue ;;
+  esac
+  n=$((n + 1))
+  pid=$(printf '%s\n' "$line" | sed -n 's/.* pid=\([0-9-]*\).*/\1/p')
+  name=$(printf '%s\n' "$line" | sed -n 's/.* name=\([^ ]*\).*/\1/p')
+  dur=$(printf '%s\n' "$line" | sed -n 's/.* duration_us=\([^ ]*\).*/\1/p')
+  slide=$(printf '%s\n' "$line" | sed -n 's/.* slide=\(0x[0-9a-fA-F]*\).*/\1/p')
+  exe=$(printf '%s\n' "$line" | sed -n 's/.* exe=\(.*\) frames=.*/\1/p')
+  frames=$(printf '%s\n' "$line" | sed -n 's/.*frames=\(.*\)$/\1/p')
+
+  echo "== stall #$n pid=$pid name=$name duration_us=$dur"
+  if [ -z "$frames" ] || [ "$frames" = "-" ]; then
+    echo "   (no frames captured)"
+    continue
+  fi
+  if [ ! -x "$exe" ] && [ ! -r "$exe" ]; then
+    echo "   (executable not found: $exe)"
+    continue
+  fi
+  addrs=$(printf '%s' "$frames" | tr ',' ' ')
+  if [ "$os" = "Darwin" ]; then
+    # shellcheck disable=SC2086
+    atos -o "$exe" -l "$slide" $addrs | sed 's/^/   /'
+  else
+    for a in $addrs; do
+      off=$(printf '0x%x' $((a - slide)))
+      addr2line -e "$exe" -f -C "$off" | tr '\n' ' ' | sed 's/^/   /'
+      echo ""
+    done
+  fi
+done < "$1"

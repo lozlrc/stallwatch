@@ -3,6 +3,6 @@
 # the container needs --cap-add=SYS_PTRACE for the remote tests.
 FROM debian:bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    g++ make libunwind-dev binutils \
+    g++ clang make libunwind-dev binutils \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src

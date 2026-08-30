@@ -3,8 +3,12 @@ CXX      ?= clang++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra
 CPPFLAGS += -Iinclude -Isrc
 # sw_demo stays at -O0 with frame pointers so captured backtraces reliably
-# contain stall_here for the symbolizer test.
-DEMOFLAGS = -std=c++20 -O0 -g -fno-omit-frame-pointer -Wall -Wextra
+# contain stall_here for the symbolizer test. Unwind tables are requested
+# explicitly: a remote unwinder walks the target from outside using .eh_frame,
+# and compilers do not all emit it by default (clang on aarch64 omitted enough
+# that libunwind stopped after two frames, while gcc there did not).
+DEMOFLAGS = -std=c++20 -O0 -g -fno-omit-frame-pointer -fasynchronous-unwind-tables \
+            -funwind-tables -Wall -Wextra
 
 UNAME_S := $(shell uname -s)
 LDLIBS  :=

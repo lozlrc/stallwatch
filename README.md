@@ -202,6 +202,14 @@ On stall onset the monitor:
    `unw_init_remote`), which read the target's registers and memory for it.
 4. `PTRACE_DETACH`, letting the target run again.
 
+A remote unwinder reads the target's `.eh_frame` rather than following frame
+pointers, so the target must actually carry unwind tables. Compilers disagree
+about emitting them: a clang-built aarch64 demo gave libunwind only two
+unresolvable frames, where the same source built by gcc unwound fully. The
+Makefile therefore asks for them explicitly with `-fasynchronous-unwind-tables
+-funwind-tables` rather than relying on a default, and the container harness
+runs the suite under both compilers so the difference cannot hide again.
+
 The target is frozen only between the interrupt and the detach; in remote mode
 the report's `handler_us` field carries that frozen window. This path crosses
 the signal frame that defeats glibc `backtrace()`, so the remote integration

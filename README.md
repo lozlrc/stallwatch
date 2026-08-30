@@ -9,9 +9,12 @@ stalled process at the moment of the stall via a cooperative signal protocol.
 Inspired by the stall-diagnosis problem described in HRT's 2025 SWE intern
 spotlight (https://www.hudsonrivertrading.com/hrtbeat/intern-spotlight-2025-software-engineering-summer-projects/);
 this is an independent implementation with no affiliation. The original used
-non-cooperative remote unwinding and Intel PT; this project implements the
-cooperative-signal design and documents the remote-unwind approach as a
-sketch below.
+non-cooperative remote unwinding and Intel PT. This project implements both
+capture modes: a cooperative SIGUSR2 protocol, and a non-cooperative ptrace
+plus libunwind path for targets that cannot run a handler. Intel PT is
+documented as a not-implemented extension. The monitor was developed on macOS
+arm64; the Linux paths, including remote capture, are built and tested in a
+Debian container (`linux/run_linux_tests.sh`).
 
 ## Quick start
 
@@ -41,6 +44,12 @@ for (;;) {
 
 `STALLWATCH_SHM` overrides the shm name for both client and monitor (the
 tests use this to isolate runs).
+
+On Linux, `--capture-mode remote` captures a stalled process's stack with
+ptrace plus libunwind and needs no handler in the target;
+`linux/run_linux_tests.sh` builds with g++ and runs the whole suite, remote
+capture included, in a container (it needs `--cap-add=SYS_PTRACE`, which the
+script passes).
 
 ## Design
 
@@ -124,13 +133,20 @@ On stall onset with `--capture`:
    CAS CAPTURE_REQ back to ACTIVE and report the stall with no frames
 
 The signal interrupts the stalled code, so the captured stack contains the
-stalling frame; the demo's `stall_here` shows up symbolized in the
-integration test. `backtrace()` is not formally async-signal-safe (it is not
-on the POSIX list, and glibc may load a helper library on first use); Session
+stalling frame. `backtrace()` is not formally async-signal-safe (it is not on
+the POSIX list, and glibc may load a helper library on first use); Session
 warms it up once at construction outside signal context, and the residual
 risk is accepted plainly here because this is a diagnostic tool, not a
 correctness dependency. Handler time measured on this machine: p50 0.6 us,
 p99 3.1 us across 200 captures.
+
+One portability finding worth stating: on macOS `backtrace()` crosses the
+signal frame into the interrupted code, so the cooperative capture symbolizes
+the demo's `stall_here` directly. On glibc/aarch64 it does not reliably cross
+the signal frame; it stops in libc, so the user frame is missing. That is one
+reason the remote path below exists. The signal integration test therefore
+asserts the `stall_here` symbol only on macOS, and the remote test asserts it
+on Linux.
 
 ## Non-temporal stores
 
@@ -153,24 +169,36 @@ a false stall, but there is no upside to pay for it. Conclusion for this
 machine: use the default plain store. The NT path stays in because measuring
 it was the point and the x86 story may differ.
 
-## Remote unwind design sketch (not implemented)
+## Remote capture (ptrace + libunwind)
 
-The non-cooperative alternative, for targets that cannot run a handler
-(signal-masked, wedged in uninterruptible state, or not instrumented):
+`--capture-mode remote` captures a backtrace with no cooperation from the
+target, for stalls the signal path cannot reach: SIGUSR2 masked, the thread
+stopped, or simply a fuller stack than a signal handler produces (on
+glibc/aarch64 the cooperative handler cannot cross its own signal frame, see
+above). Linux only; the monitor refuses the mode on other platforms, and the
+build links libunwind only when `SW_REMOTE=1` (the default on Linux).
 
-- On stall onset, attach with `ptrace(PTRACE_SEIZE)` then `PTRACE_INTERRUPT`,
-  stopping the target for the duration of the walk.
-- Read registers with `PTRACE_GETREGSET` and stack memory with
-  `process_vm_readv`, which needs no cooperation from the target.
-- Unwind with libunwind-ptrace: `unw_create_addr_space(&_UPT_accessors, 0)`
-  plus `_UPT_create(pid)` walks the remote stack using the target's unwind
-  tables; detach and let it run again.
-- Intel PT goes further: `perf_event_open` with the intel_pt PMU records a
-  continuous branch trace, and decoding the window around the stall shows
-  where the time went, not just one snapshot.
-- All of this is Linux-specific (and PT is x86-specific); macOS offers no
-  equivalent of this ptrace surface, which is why this repo ships the
-  cooperative protocol instead.
+On stall onset the monitor:
+
+1. `ptrace(PTRACE_SEIZE, pid)`, then `PTRACE_INTERRUPT` to group-stop the
+   target without injecting a signal.
+2. `waitpid` for the stop. If it raced with a real signal-delivery stop, that
+   signal is re-delivered on detach so nothing is swallowed.
+3. Walks the remote stack with libunwind's ptrace accessors
+   (`unw_create_addr_space(&_UPT_accessors, 0)`, `_UPT_create(pid)`,
+   `unw_init_remote`), which read the target's registers and memory for it.
+4. `PTRACE_DETACH`, letting the target run again.
+
+The target is frozen only between the interrupt and the detach; in remote mode
+the report's `handler_us` field carries that frozen window. This path crosses
+the signal frame that defeats glibc `backtrace()`, so the remote integration
+test asserts `stall_here` in the symbolized frames on Linux. Measured frozen
+window to unwind a stalled process from outside: p50 88 us (see benchmarks).
+
+Not implemented: Intel PT. `perf_event_open` with the intel_pt PMU records a
+continuous branch trace, so decoding the window around a stall shows where the
+time went rather than a single snapshot. It is x86-only and out of scope for
+this arm64-developed repo.
 
 ## Benchmarks
 
@@ -210,6 +238,31 @@ Detect latency lands where the poll interval predicts (under one poll at p50).
 Duration error is bounded by the client beat interval (100 us here) plus
 scheduler noise, as expected for beat-to-beat measurement.
 
+### Linux (container)
+
+Built with g++ 12 in a Debian container via `linux/run_linux_tests.sh`; raw
+output at `bench/results_linux.txt`. Beat cost on Linux aarch64:
+
+```
+empty_loop        0.30 ns/iter
+clock_read       19.17 ns/iter
+beat_plain       19.45 ns/iter
+beat_nt          19.43 ns/iter
+```
+
+`CLOCK_MONOTONIC_RAW` reads slower here than macOS `CLOCK_UPTIME_RAW`, and NT
+is neutral as on macOS. Remote capture (50 injected 2 ms stalls, threshold
+500 us, poll 100 us):
+
+```
+frozen_window_us    p50=88.0   p99=427.8   max=430.8
+detect_latency_us   p50=96.8   p99=192.7
+```
+
+The frozen window is how long ptrace pauses the target for the stack walk. The
+container runs in a VM on the same M2 Pro, so read the Linux numbers as
+order-of-magnitude, not a head-to-head with the native macOS run.
+
 ## Tests
 
 `make test` runs both:
@@ -230,22 +283,39 @@ scheduler noise, as expected for beat-to-beat measurement.
   preemptions, which the exact-count assertion cannot distinguish from real
   stalls.
 
+- `tests/test_integration_remote.sh`: the same scenario with
+  `--capture-mode remote`, so the client never runs a handler. Asserts 3
+  stalls, a non-zero frozen window per stall, frames captured, and
+  `stall_here` in the symbolized output. Linux only; self-skips on macOS and
+  when the monitor was built without `SW_REMOTE`.
+
 `sw_demo` is built at -O0 with frame pointers so the captured backtrace
 reliably contains the noinline `stall_here` frame.
 
+`linux/run_linux_tests.sh` runs the full suite (unit, signal integration, and
+remote integration) under g++ in a Debian container and refreshes
+`bench/results_linux.txt`. It copies the source into the container, so host
+build artifacts are never touched, and passes `--cap-add=SYS_PTRACE` for the
+remote path.
+
 ## Limitations
 
-- Capture is cooperative only. A target that masks SIGUSR2, is stopped, or is
-  wedged in the kernel produces a stall record with no frames (the 50 ms
-  handshake times out). The remote-unwind sketch above is the fix and is not
-  implemented.
+- Two capture modes with different reach. The cooperative signal mode works
+  everywhere but produces no frames if the target masks SIGUSR2, is stopped,
+  or is wedged in the kernel, and cannot cross its signal frame on
+  glibc/aarch64. The remote mode fixes both but is Linux only and needs ptrace
+  permission (the container passes `SYS_PTRACE`; on a host, `ptrace_scope` or
+  `CAP_SYS_PTRACE` applies). It captures the target's main thread. Intel PT is
+  not implemented.
 - One `Session` per process (the signal handler uses process globals), 64
   slots per registry, single machine only.
 - Stall durations are beat-to-beat, so resolution is the client's beat
   interval; stalls still in progress when the monitor exits are not recorded.
-- All numbers above are from this macOS arm64 machine. The Linux code paths
-  (`CLOCK_MONOTONIC_RAW`, `/proc/self/maps` base, `SYS_gettid`, addr2line
-  symbolization, `-lrt`) are compile-gated and untested here, and glibc is
-  assumed for `execinfo.h` (musl lacks it).
+- Native-hardware numbers are from the macOS arm64 machine. The Linux paths
+  (`CLOCK_MONOTONIC_RAW`, `/proc/self/maps` base, `SYS_gettid`, addr2line,
+  ptrace remote capture) are built and tested in a container, but those Linux
+  numbers come from a VM on the same host, not bare metal. glibc is assumed
+  for `execinfo.h` and libunwind for remote capture (musl and a no-libunwind
+  build compile the cooperative path only).
 - `backtrace()` from a signal handler is not formally async-signal-safe; see
   the capture section.

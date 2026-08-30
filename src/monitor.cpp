@@ -2,6 +2,7 @@
 // stall durations, and optionally captures a backtrace from the stalled
 // process via the cooperative SIGUSR2 protocol.
 #include "detect.hpp"
+#include "remote_unwind.hpp"
 #include "report.hpp"
 #include "shm.hpp"
 
@@ -22,6 +23,7 @@ struct Options {
   uint64_t threshold_us = 500;
   uint64_t poll_us = 100;
   bool capture = false;
+  bool remote = false;   // --capture-mode remote: ptrace + libunwind, no client cooperation
   const char* report = "stallwatch_report.txt";
   long max_stalls = 0;   // 0 = unlimited
   long run_for_ms = 0;   // 0 = run until killed
@@ -31,8 +33,8 @@ struct Options {
 
 void usage(const char* argv0) {
   fprintf(stderr,
-          "usage: %s [--threshold-us N] [--poll-us N] [--capture] [--report FILE]\n"
-          "          [--max-stalls N] [--run-for-ms N] [--shm NAME] [--unlink-on-exit]\n",
+          "usage: %s [--threshold-us N] [--poll-us N] [--capture] [--capture-mode signal|remote]\n"
+          "          [--report FILE] [--max-stalls N] [--run-for-ms N] [--shm NAME] [--unlink-on-exit]\n",
           argv0);
 }
 
@@ -55,6 +57,18 @@ bool parse_args(int argc, char** argv, Options& o) {
       o.poll_us = strtoull(v, nullptr, 10);
     } else if (!strcmp(argv[i], "--capture")) {
       o.capture = true;
+    } else if (!strcmp(argv[i], "--capture-mode")) {
+      const char* v = need("--capture-mode");
+      if (!v) return false;
+      if (!strcmp(v, "signal")) {
+        o.remote = false;
+      } else if (!strcmp(v, "remote")) {
+        o.remote = true;
+        o.capture = true;
+      } else {
+        fprintf(stderr, "stallwatchd: --capture-mode must be signal or remote\n");
+        return false;
+      }
     } else if (!strcmp(argv[i], "--report")) {
       const char* v = need("--report");
       if (!v) return false;
@@ -79,6 +93,18 @@ bool parse_args(int argc, char** argv, Options& o) {
     }
   }
   return o.threshold_us > 0 && o.poll_us > 0;
+}
+
+// Non-cooperative capture: freeze the target with ptrace and unwind its stack
+// from this process. handler_us reports the frozen window in this mode.
+void do_capture_remote(int pid, sw::StallRec& rec) {
+  sw::RemoteCapture c = sw::remote_unwind(pid, sw::kFramesCap);
+  if (c.err != 0 && c.frames.empty()) {
+    fprintf(stderr, "stallwatchd: remote unwind pid=%d failed errno=%d\n", pid, c.err);
+    return;
+  }
+  rec.frames = std::move(c.frames);
+  rec.handler_us = double(c.stop_ns) / 1000.0;
 }
 
 // Request a backtrace from a stalled client and wait briefly for it.
@@ -117,6 +143,10 @@ void do_capture(sw::Registry& reg, uint32_t i, sw::StallRec& rec) {
 int main(int argc, char** argv) {
   Options o;
   if (!parse_args(argc, argv, o)) return 2;
+  if (o.remote && !sw::remote_unwind_supported()) {
+    fprintf(stderr, "stallwatchd: --capture-mode remote is not supported on this platform\n");
+    return 2;
+  }
 
   sw::Registry reg;
   if (!sw::registry_open(reg, o.shm, true)) {
@@ -130,8 +160,9 @@ int main(int argc, char** argv) {
     return 1;
   }
   fprintf(rf, "# stallwatch report v1\n");
-  fprintf(rf, "# shm=%s threshold_us=%" PRIu64 " poll_us=%" PRIu64 " capture=%d\n", reg.shm_name,
-          o.threshold_us, o.poll_us, int(o.capture));
+  fprintf(rf, "# shm=%s threshold_us=%" PRIu64 " poll_us=%" PRIu64 " capture=%d mode=%s\n",
+          reg.shm_name, o.threshold_us, o.poll_us, int(o.capture),
+          o.remote ? "remote" : "signal");
   fflush(rf);
 
   static sw::TrackState tracks[sw::kMaxSlots];
@@ -175,7 +206,12 @@ int main(int argc, char** argv) {
         p.rec.detect_us = double(ev.detect_latency_ns) / 1000.0;
         p.rec.slide = s.aslr_slide;
         p.rec.exe.assign(reg.exe(i), strnlen(reg.exe(i), sw::kExeCap));
-        if (o.capture) do_capture(reg, i, p.rec);
+        if (o.capture) {
+          if (o.remote)
+            do_capture_remote(s.pid, p.rec);
+          else
+            do_capture(reg, i, p.rec);
+        }
       } else if (ev.kind == sw::StallEvent::RECOVERY && pending[i].active) {
         Pending& p = pending[i];
         p.rec.duration_us = double(ev.duration_ns) / 1000.0;

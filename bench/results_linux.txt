@@ -1,0 +1,18 @@
+# stallwatch Linux results
+# Linux aarch64, g++ (Debian 12.2.0-14+deb12u1) 12.2.0, container via linux/run_linux_tests.sh
+
+== bench_beat
+machine: aarch64, Linux 6.8.0-117-generic
+compiler: 12.2.0
+iters: 200000000
+empty_loop        0.30 ns/iter
+clock_read       19.17 ns/iter  (ns_now only)
+beat_plain       19.45 ns/iter
+beat_nt          19.43 ns/iter
+scan_4mb_alone    22.8 GB/s
+scan_4mb_plain    22.5 GB/s  (one beat_plain per 4 MB scan)
+scan_4mb_nt       22.6 GB/s  (one beat_nt per 4 MB scan)
+
+remote capture bench: 50 stalls of 2 ms, threshold 500 us, poll 100 us
+frozen_window_us    p50=88.0  p99=427.8  max=430.8
+detect_latency_us   p50=96.8  p99=192.7

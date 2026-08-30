@@ -286,12 +286,18 @@ inline void beat_store_plain(std::atomic<uint64_t>* a, uint64_t v) noexcept {
 
 // Non-temporal variant. Casting the atomic to a plain u64 is formally outside
 // the standard but layout-compatible on both targets; asserted below.
+// x86: movnti via _mm_stream_si64 (clang and gcc). clang elsewhere: the
+// nontemporal builtin (lowers to stnp on aarch64). gcc/aarch64 has no portable
+// single-word NT store builtin, so it falls back to a plain store; that is
+// honest here since NT showed no measured benefit on this arm64 core.
 inline void beat_store_nt(std::atomic<uint64_t>* a, uint64_t v) noexcept {
   static_assert(sizeof(std::atomic<uint64_t>) == sizeof(uint64_t));
 #if defined(__x86_64__)
   _mm_stream_si64(reinterpret_cast<long long*>(a), (long long)(v)); // untested here (arm64 machine)
-#else
+#elif defined(__clang__)
   __builtin_nontemporal_store(v, reinterpret_cast<uint64_t*>(a));
+#else
+  a->store(v, std::memory_order_relaxed);
 #endif
 }
 

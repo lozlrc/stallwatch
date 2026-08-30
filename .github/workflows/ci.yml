@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: test (${{ matrix.cxx }}, x86-64 linux)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cxx: [g++, clang++]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain and libunwind
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++ clang make libunwind-dev binutils
+
+      # GitHub runners allow ptrace of your own processes, so the remote
+      # capture path (ptrace + libunwind) runs here for real. If a runner image
+      # ever tightens ptrace_scope, test_integration_remote.sh reports the
+      # failure rather than silently skipping.
+      - name: Check ptrace_scope
+        run: cat /proc/sys/kernel/yama/ptrace_scope || echo "yama not present"
+
+      - name: Build and test (unit, signal capture, remote capture)
+        run: make test CXX=${{ matrix.cxx }}
+
+      # First measurement of the x86 non-temporal store path, which the
+      # author's arm64 machine cannot exercise. Runner numbers are noisy and
+      # are printed to the log only; the committed results files stay as the
+      # author's measured artifacts.
+      - name: Beat cost on x86-64 (log only)
+        run: ./bin/bench_beat
+
+  # The default build has no libunwind and must still compile and pass the
+  # cooperative path, with the remote test skipping itself.
+  no-remote:
+    name: build without SW_REMOTE
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install toolchain (no libunwind)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq g++ make binutils
+      - name: Build and test
+        run: make test CXX=g++ SW_REMOTE=0

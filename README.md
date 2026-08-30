@@ -303,10 +303,13 @@ remote path.
 - Two capture modes with different reach. The cooperative signal mode works
   everywhere but produces no frames if the target masks SIGUSR2, is stopped,
   or is wedged in the kernel, and cannot cross its signal frame on
-  glibc/aarch64. The remote mode fixes both but is Linux only and needs ptrace
-  permission (the container passes `SYS_PTRACE`; on a host, `ptrace_scope` or
-  `CAP_SYS_PTRACE` applies). It captures the target's main thread. Intel PT is
-  not implemented.
+  glibc/aarch64. The remote mode fixes both but is Linux only and needs
+  permission to ptrace a non-descendant: the monitor is a sibling of its
+  targets, so yama `ptrace_scope=1` (the default on many distros and on GitHub
+  runners) refuses the seize with EPERM. Run the monitor as root, grant it
+  `CAP_SYS_PTRACE`, or set `kernel.yama.ptrace_scope=0`; the container harness
+  and CI do the equivalent, and the remote test skips loudly where none holds.
+  It captures the target's main thread. Intel PT is not implemented.
 - One `Session` per process (the signal handler uses process globals), 64
   slots per registry, single machine only.
 - Stall durations are beat-to-beat, so resolution is the client's beat

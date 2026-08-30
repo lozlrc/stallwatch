@@ -11,6 +11,20 @@ if [ "$(uname -s)" != "Linux" ]; then
   exit 0
 fi
 
+# Remote capture ptraces a process that is not its child (the monitor and the
+# demo are siblings). Yama ptrace_scope=1, the default on many distros and on
+# GitHub runners, allows ptrace of descendants only, so the seize is refused
+# with EPERM before any product code is exercised. Skip there rather than
+# report a product failure; the container harness runs as root with
+# CAP_SYS_PTRACE and CI sets ptrace_scope=0, so both test it for real.
+scope=0
+[ -r /proc/sys/kernel/yama/ptrace_scope ] && scope=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo 0)
+if [ "$scope" != "0" ] && [ "$(id -u)" != "0" ]; then
+  echo "integration-remote: SKIP (yama ptrace_scope=$scope allows ptrace of descendants only;"
+  echo "  run as root, grant CAP_SYS_PTRACE, or set kernel.yama.ptrace_scope=0 to exercise it)"
+  exit 0
+fi
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/bin"
 TMP="${TMPDIR:-/tmp}/swremote.$$"

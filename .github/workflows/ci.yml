@@ -22,12 +22,15 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq g++ clang make libunwind-dev binutils
 
-      # GitHub runners allow ptrace of your own processes, so the remote
-      # capture path (ptrace + libunwind) runs here for real. If a runner image
-      # ever tightens ptrace_scope, test_integration_remote.sh reports the
-      # failure rather than silently skipping.
-      - name: Check ptrace_scope
-        run: cat /proc/sys/kernel/yama/ptrace_scope || echo "yama not present"
+      # Runners default to yama ptrace_scope=1, which allows ptrace of
+      # descendants only; the monitor and the demo are siblings, so remote
+      # capture would be refused with EPERM. Grant it so the path is genuinely
+      # exercised here (the test self-skips, loudly, wherever it is not).
+      - name: Allow ptrace of non-descendants
+        run: |
+          cat /proc/sys/kernel/yama/ptrace_scope || echo "yama not present"
+          sudo sysctl -w kernel.yama.ptrace_scope=0
+
 
       - name: Build and test (unit, signal capture, remote capture)
         run: make test CXX=${{ matrix.cxx }}

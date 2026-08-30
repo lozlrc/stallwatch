@@ -1,5 +1,7 @@
 # stallwatch
 
+[![ci](https://github.com/lozlrc/stallwatch/actions/workflows/ci.yml/badge.svg)](https://github.com/lozlrc/stallwatch/actions/workflows/ci.yml)
+
 Low-overhead stall detector for event-loop processes. Instrumented processes
 write a heartbeat into a per-process shared-memory slot on every loop
 iteration; a monitor daemon scans the slots, flags any heartbeat older than a
@@ -152,10 +154,10 @@ on Linux.
 
 `beat()` uses a plain relaxed atomic store by default; building with
 `-DSW_NT=1` switches the timestamp store to a non-temporal one
-(`__builtin_nontemporal_store`; on x86_64 `_mm_stream_si64`, which compiles
-but is untested here since this machine is arm64). Both variants are also
-callable explicitly (`beat_plain` / `beat_nt`), which is what the bench and
-`sw_demo --nt` use.
+(`_mm_stream_si64` on x86_64, `__builtin_nontemporal_store` under clang
+elsewhere, and a plain store where neither exists, such as gcc on aarch64).
+Both variants are also callable explicitly (`beat_plain` / `beat_nt`), which
+is what the bench and `sw_demo --nt` use.
 
 Measured on this M2 Pro: the NT variant is slightly slower (10.84 vs
 10.17 ns/beat) and has no effect on the cache-interference probe (4 MB scan
@@ -165,9 +167,20 @@ nothing for a streaming hint to save. Second, Apple clang lowers an 8-byte
 `__builtin_nontemporal_store` on arm64 to `stnp w, w` (a non-temporal pair of
 32-bit halves), which adds a shift and, notably, gives up single-copy
 atomicity for the 8-byte value; the seq rule keeps a torn read from producing
-a false stall, but there is no upside to pay for it. Conclusion for this
-machine: use the default plain store. The NT path stays in because measuring
-it was the point and the x86 story may differ.
+a false stall, but there is no upside to pay for it.
+
+The x86-64 answer is worse, and it is the interesting one. Measured in CI on
+GitHub runners, `movnti` costs about 16 times a plain store: 386.9 vs 23.7
+ns/beat under clang, 367.6 vs 30.6 under g++. A non-temporal store is built
+for streaming data you will not read again, so it bypasses the cache and
+leaves the line in a write-combining buffer. The beat does the opposite: it
+rewrites one hot cacheline over and over, so every NT store forces a partial
+line out to memory instead of being absorbed by the cache, and the next store
+starts over. The cache is exactly what you want here.
+
+Conclusion on both architectures: use the default plain store. The NT path
+stays in because the measurement is the point, and because the honest answer
+is not the one the idea suggests.
 
 ## Remote capture (ptrace + libunwind)
 

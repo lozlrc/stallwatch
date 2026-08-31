@@ -73,11 +73,25 @@ bool parse_args(int argc, char** argv, Options& o) {
 } // namespace
 
 // The injected stall. Spin, not sleep, so heartbeat timestamps stay on one
-// clock and SIGUSR2 lands mid-spin with this frame on the stack. extern "C"
+// clock and a capture lands mid-spin with this frame on the stack. extern "C"
 // keeps the symbol unmangled for the symbolizer test.
+//
+// The clock is sampled once per batch rather than once per iteration. Reading
+// it every iteration leaves the process inside the vDSO's clock_gettime for
+// most of the stall, which is both unrepresentative of a compute stall and
+// unreliable to unwind out of remotely: on aarch64 libunwind stopped at the
+// vDSO frame and never reached this function. Batching keeps the instruction
+// pointer in here, where a stalled event loop would really be.
 extern "C" __attribute__((noinline)) void stall_here(uint64_t spin_ns) {
-  uint64_t end = sw::ns_now() + spin_ns;
-  while (sw::ns_now() < end) cpu_relax();
+  const uint64_t end = sw::ns_now() + spin_ns;
+  volatile uint64_t sink = 0;
+  for (;;) {
+    for (int i = 0; i < 4000; i++) {
+      sink = sink + uint64_t(i);
+      cpu_relax();
+    }
+    if (sw::ns_now() >= end) break;
+  }
 }
 
 int main(int argc, char** argv) {

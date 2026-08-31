@@ -202,19 +202,23 @@ On stall onset the monitor:
    `unw_init_remote`), which read the target's registers and memory for it.
 4. `PTRACE_DETACH`, letting the target run again.
 
-A remote unwinder reads the target's `.eh_frame` rather than following frame
-pointers, so the target must actually carry unwind tables. Compilers disagree
-about emitting them: a clang-built aarch64 demo gave libunwind only two
-unresolvable frames, where the same source built by gcc unwound fully. The
-Makefile therefore asks for them explicitly with `-fasynchronous-unwind-tables
--funwind-tables` rather than relying on a default, and the container harness
-runs the suite under both compilers so the difference cannot hide again.
+Where the target is stopped decides how far the walk gets. The demo's first
+stall loop read the clock every iteration, so the target was almost always
+inside the vDSO's `clock_gettime` when the monitor interrupted it. On x86-64
+libunwind stepped out of the vDSO and reached the stalling function; on
+aarch64 it stopped there, returning two frames in libc that no exe-relative
+symbolizer can resolve. The demo now samples the clock once per batch of work,
+which keeps the instruction pointer in its own code, where a stalled event
+loop would really be. The Makefile also builds it with
+`-fasynchronous-unwind-tables -funwind-tables` rather than trusting a compiler
+default, and the container harness runs the suite under both gcc and clang so
+this class of difference cannot hide again.
 
 The target is frozen only between the interrupt and the detach; in remote mode
 the report's `handler_us` field carries that frozen window. This path crosses
 the signal frame that defeats glibc `backtrace()`, so the remote integration
 test asserts `stall_here` in the symbolized frames on Linux. Measured frozen
-window to unwind a stalled process from outside: p50 88 us (see benchmarks).
+window to unwind a stalled process from outside: p50 323 us (see benchmarks).
 
 Not implemented: Intel PT. `perf_event_open` with the intel_pt PMU records a
 continuous branch trace, so decoding the window around a stall shows where the
@@ -276,8 +280,8 @@ is neutral as on macOS. Remote capture (50 injected 2 ms stalls, threshold
 500 us, poll 100 us):
 
 ```
-frozen_window_us    p50=88.0   p99=427.8   max=430.8
-detect_latency_us   p50=96.8   p99=192.7
+frozen_window_us    p50=322.7  p99=533.7  max=618.2
+detect_latency_us   p50=107.6  p99=232.2
 ```
 
 The frozen window is how long ptrace pauses the target for the stack walk. The
